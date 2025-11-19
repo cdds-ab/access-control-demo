@@ -1,6 +1,6 @@
 # Access Control System
 
-A professional RBAC (Role-Based Access Control) system implementing the **"Deny overrides Allow"** pattern - the gold standard in enterprise access control systems (Siemens SiPass, Lenel OnGuard, Genetec, Dormakaba).
+A professional RBAC (Role-Based Access Control) system implementing the **"Deny overrides Allow"** pattern with hierarchical permission inheritance - a model commonly used in enterprise access control systems like Lenel OnGuard, Genetec Security Center, and Siemens SiPass.
 
 ## Quick Start
 
@@ -87,7 +87,34 @@ deny_permissions (group_id, dgroup_id)
 
 ### Core Principle
 
-In professional access control systems, explicit **Deny rules always take precedence** over Allow rules. This ensures security by default - if there's any doubt, access is denied.
+**By default, everything is denied.** No Allow = no access.
+
+When you grant an Allow to a door group, all its children are also allowed (inheritance down the tree). To restrict part of that tree, you add an explicit Deny, which also inherits down to its children.
+
+### How It Works
+
+1. **Default: Everything is denied**
+   - Without any permissions, no user can access any door
+
+2. **Allow opens a branch:**
+   ```
+   UserGroup → Allow DoorGroup1
+   ```
+   → DoorGroup1 and all its children are now accessible
+
+3. **Deny cuts off a sub-branch:**
+   ```
+   UserGroup → Deny DoorGroup2 (child of DoorGroup1)
+   ```
+   → DoorGroup2 and its children are blocked again
+
+4. **A new Allow can re-open deeper:**
+   ```
+   UserGroup → Allow DoorGroup3 (child of DoorGroup2)
+   ```
+   → DoorGroup3 is accessible again
+
+Think of it as sculpting a tree: Allow opens branches, Deny cuts them off.
 
 ### Permission Resolution Rules
 
@@ -125,6 +152,154 @@ Allgemeine Bereiche (Common)
 - Lisa (in `Software-Entwicklung`): ✅ Coffee Kitchen, ❌ HW-Labor, ✅ SW-Bereich
 
 The inherited Deny from `Entwicklung` is overridden by the direct Allow on the specialized groups.
+
+### Understanding Door Group Inheritance
+
+*This explanation was contributed by a human who found it clearer than the technical documentation.*
+
+Before understanding the full system, focus on just **one user group** and **door group hierarchy**:
+
+```
+Door Groups:
+dg1 (Building)
+└── dg2 (Office Area)
+    └── dg3 (Server Room)
+```
+
+**Key insight:** Permissions flow DOWN the door group tree.
+
+#### Allow-first approach
+
+```
+ug1 → Allow dg1
+ug1 → Deny dg3
+```
+
+- Allow on dg1 automatically grants access to dg2 and dg3 (children)
+- Deny on dg3 blocks only dg3
+
+**Result:** ug1 can access dg1 ✅, dg2 ✅, dg3 ❌
+
+#### Deny-first approach
+
+```
+ug1 → Deny dg1
+ug1 → Allow dg2
+```
+
+- Deny on dg1 automatically blocks dg2 and dg3 (children)
+- Allow on dg2 overrides the inherited Deny for dg2 **and its children**
+
+**Result:** ug1 can access dg1 ❌, dg2 ✅, dg3 ✅
+
+This is the foundation. The user group hierarchy (with Direct/Inherited rules) adds a second layer on top of this.
+
+### When Do You Need User Group Hierarchy?
+
+The system supports hierarchical user groups, but they're not always necessary.
+
+#### Flat User Groups Suffice When:
+
+- Groups are disjoint (Employees, Guests, Contractors)
+- Few overlapping permissions
+
+**Example with flat groups:**
+
+```
+User Groups (flat):     Door Groups (hierarchical):
+- Employees             Building
+- Guests                ├── Common Areas
+                        │   ├── Coffee Kitchen
+                        │   └── Meeting Rooms
+                        └── Executive Floor
+
+Permissions:
+Employees → Allow: Building
+Employees → Deny: Executive Floor
+Guests → Allow: Meeting Rooms
+```
+
+Result: Employees access everything except Executive Floor. Guests only access Meeting Rooms.
+
+#### Hierarchical User Groups Help When:
+
+- Roles inherit from other roles (Executive Assistant inherits from Employee)
+- Avoiding duplicate permission assignments
+
+**Example with hierarchy:**
+
+```
+User Groups (hierarchical):
+Employees
+└── Executive Assistants
+
+Permissions:
+Employees → Allow: Building
+Employees → Deny: Executive Floor
+Executive Assistants → Allow: Executive Floor  (Direct Allow overrides Inherited Deny)
+```
+
+Result: Executive Assistants inherit all Employee permissions AND get Executive Floor access.
+
+#### Design Recommendation
+
+Structure your data based on:
+1. **Building/physical layout** → Door group hierarchy
+2. **Organizational structure** → User group hierarchy (if needed)
+
+A flat user group structure is often sufficient. Use hierarchy only when inheritance genuinely reduces complexity. The system supports both approaches.
+
+**Future feature idea:** Automatic analysis to suggest structure optimizations (e.g., "These 5 groups have identical permissions → merge?" or "This group could inherit from that one → save 12 rules").
+
+### Best Practice: Optimizing Permission Count
+
+Choose your strategy based on how many permissions a group needs:
+
+| Group needs... | Strategy | Result |
+|----------------|----------|--------|
+| Many permissions (e.g., 47/50 doors) | **Allow-first, Deny explicit** | Fewer rules |
+| Few permissions (e.g., 3/50 doors) | **Deny-first, Allow explicit** | Fewer rules |
+
+#### Example: Interns (few permissions)
+
+Instead of creating 47 individual Deny rules:
+
+```
+# Bad: 47+ rules
+Interns → Allow: Door 1, 2, 3
+Interns → Deny: Door 4, 5, 6, ... 50
+```
+
+Use Deny-first with explicit Allow:
+
+```
+# Good: 2 rules
+Interns → Deny: Building (top-level door group)
+Interns → Allow: Coffee Kitchen
+```
+
+Result: Interns can only access the Coffee Kitchen.
+
+#### Example: Management (many permissions)
+
+Instead of creating 47 individual Allow rules:
+
+```
+# Bad: 47 rules
+Management → Allow: Door 1, 2, 3, ... 47
+```
+
+Use Allow-first with explicit Deny:
+
+```
+# Good: 4 rules
+Management → Allow: Building (top-level door group)
+Management → Deny: High-Security-Lab
+Management → Deny: Vault
+Management → Deny: Server-Room
+```
+
+Result: Management can access everything except the three restricted areas.
 
 ### SQL Query Implementation
 
@@ -228,10 +403,15 @@ DELETE /api/permissions/deny/{group}/{dgroup}
 
 ## Why This Pattern?
 
-### Industry Standard
-- Siemens SiPass, Lenel OnGuard, Genetec, AMAG, Kaba/dormakaba
-- NIST RBAC Standard
-- ISO 27001 recommendations
+### Industry Context
+
+This permission model follows patterns commonly found in enterprise physical access control systems:
+
+- **Deny overrides Allow** at the same level (fail-safe default)
+- **Direct permissions override inherited ones** (specificity wins)
+- **Hierarchical inheritance** for both door groups and user groups
+
+Similar approaches are documented in systems like Lenel OnGuard, Genetec Security Center, Siemens SiPass integrated, and others. The model also aligns with NIST SP 800-162 (ABAC) principles regarding explicit deny precedence.
 
 ### Benefits
 - **Security by default**: Deny always wins on conflict
